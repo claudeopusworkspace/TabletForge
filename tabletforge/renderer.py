@@ -191,7 +191,13 @@ def _generate_tablet_mask(w, h, config, rng):
 
     # --- 1D fractal noise along the perimeter ---
     amp_large = h * 0.20 * config.edge_roughness
-    amp_fine = h * 0.09 * config.edge_roughness
+
+    # Fine amplitude varies along the perimeter (some zones smooth,
+    # some jagged) using a slow modulation signal
+    amp_fine_mod = fbm_2d(1, n_pts, octaves=2,
+                          base_scale=max(2, n_pts * 0.15),
+                          persistence=0.5, rng=rng)[0]
+    amp_fine = h * (0.10 + amp_fine_mod * 0.30) * config.edge_roughness
 
     lg = fbm_2d(1, n_pts, octaves=3,
                 base_scale=max(2, n_pts * 0.25),
@@ -201,12 +207,40 @@ def _generate_tablet_mask(w, h, config, rng):
                 persistence=0.55, rng=rng)[0]
     disp = (lg - 0.5) * amp_large + (fn - 0.5) * amp_fine
 
+    # --- Random bite indentations along the perimeter ---
+    n_bites = max(0, rng.poisson(6))
+    indices = np.arange(n_pts, dtype=np.float64)
+
+    for _ in range(n_bites):
+        center = rng.randint(0, n_pts)
+        # Width in perimeter points (narrow to wide)
+        width = rng.uniform(n_pts * 0.01, n_pts * 0.06)
+        # Depth (always inward)
+        depth = h * rng.uniform(0.02, 0.10) * config.edge_roughness
+
+        # Wrapped distance from bite center
+        dist = np.abs(indices - center)
+        dist = np.minimum(dist, n_pts - dist)
+
+        # Gaussian bite profile
+        bite = depth * np.exp(-0.5 * (dist / max(1.0, width)) ** 2)
+
+        # Some bites get extra jaggedness on top
+        if rng.random() > 0.4:
+            jag = fbm_2d(1, n_pts, octaves=4,
+                         base_scale=max(2, n_pts * 0.03),
+                         persistence=0.5, rng=rng)[0]
+            jag_amp = depth * rng.uniform(0.2, 0.6)
+            bite += (jag - 0.5) * jag_amp * (bite / max(depth, 1e-6))
+
+        # Subtract = push inward (normal points outward)
+        disp -= bite
+
     # Blend the seam so the last perimeter point connects smoothly
     # back to the first (they are physically adjacent on the polygon)
     blend_n = max(8, n_pts // 20)
     for i in range(blend_n):
         t = i / blend_n
-        # Blend end → start
         idx_end = n_pts - blend_n + i
         disp[idx_end] = disp[idx_end] * (1.0 - t) + disp[i] * t
 
