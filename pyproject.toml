@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tabletforge"
+version = "0.1.0"
+description = "Generate ancient stone tablet images with custom fonts"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Michael Wojnar", email = "michael.j.wojnar@gmail.com"},
+]
+dependencies = [
+    "numpy>=1.21",
+    "Pillow>=9.0",
+]
+
+[project.scripts]
+tabletforge = "tabletforge.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/claudeopusworkspace/TabletForge"
+
+[tool.setuptools.packages.find]
+include = ["tabletforge*"]
