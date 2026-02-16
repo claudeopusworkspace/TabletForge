@@ -20,7 +20,6 @@ class TabletConfig:
     padding: float = 0.15
     corner_radius: float = 0.06
     edge_roughness: float = 0.4
-    chip_count: int = 8
 
     # Stone appearance
     stone_color: tuple = (180, 165, 140)
@@ -33,6 +32,7 @@ class TabletConfig:
 
     # Weathering
     crack_density: float = 0.4
+    pit_density: float = 0.3
     wear: float = 0.5
 
     # Edge bevel
@@ -128,64 +128,65 @@ def render(text, font_dir, height, seed=None, config=None):
 # ---------------------------------------------------------------------------
 
 def _generate_tablet_mask(w, h, config, rng):
-    """Generate the tablet silhouette with crumbly edges and chips."""
-    img = Image.new('L', (w, h), 0)
-    draw = ImageDraw.Draw(img)
-    r = max(1, int(h * config.corner_radius))
-    draw.rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=255)
+    """Generate the tablet silhouette with crumbly, irregular edges.
 
+    Uses four independent 1D noise profiles (one per edge) to create
+    genuinely irregular boundaries rather than a modulated rectangle.
+    """
     if config.edge_roughness <= 0:
+        img = Image.new('L', (w, h), 0)
+        draw = ImageDraw.Draw(img)
+        r = max(1, int(h * config.corner_radius))
+        draw.rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=255)
         return img
 
-    mask = np.array(img, dtype=np.float64) / 255.0
+    # Leave room at canvas edges for outward displacement
+    margin = max(3, int(h * 0.06 * config.edge_roughness))
 
-    # Approximate distance from edge via Gaussian blur
-    blur_r = max(1, int(h * 0.06))
-    dist = np.array(
-        img.filter(ImageFilter.GaussianBlur(radius=blur_r)),
-        dtype=np.float64
-    ) / 255.0
+    # Displacement amplitudes (scale with size and roughness)
+    amp_large = h * 0.10 * config.edge_roughness
+    amp_fine = h * 0.04 * config.edge_roughness
 
-    # Noise field for edge irregularity
-    noise = fbm_2d(h, w, octaves=5, base_scale=h * 0.2,
-                   persistence=0.55, rng=rng)
+    def _edge_noise(length):
+        """Fractal 1D displacement profile centred on zero."""
+        lg = fbm_2d(1, length, octaves=3,
+                    base_scale=max(2, length * 0.3),
+                    persistence=0.5, rng=rng)[0]
+        fn = fbm_2d(1, length, octaves=5,
+                    base_scale=max(2, length * 0.07),
+                    persistence=0.55, rng=rng)[0]
+        return (lg - 0.5) * amp_large + (fn - 0.5) * amp_fine
 
-    # Threshold: where dist < edge_threshold * noise_scaled, cut away
-    edge_threshold = 0.3 + (1.0 - config.edge_roughness) * 0.5
-    noise_scaled = noise * 0.8 + 0.2
-    final_mask = (dist > edge_threshold * noise_scaled).astype(np.float64)
+    # Base edge positions (inset from canvas border)
+    top_base = float(margin)
+    bot_base = float(h - 1 - margin)
+    left_base = float(margin)
+    right_base = float(w - 1 - margin)
 
-    # Smooth the jagged result slightly
-    final_img = Image.fromarray((final_mask * 255).astype(np.uint8))
-    final_img = final_img.filter(ImageFilter.GaussianBlur(radius=1))
-    final_mask = np.array(final_img, dtype=np.float64) / 255.0
+    # Displaced edge positions (noise pushes edges inward)
+    top_y = top_base + _edge_noise(w)
+    bot_y = bot_base - _edge_noise(w)
+    left_x = left_base + _edge_noise(h)
+    right_x = right_base - _edge_noise(h)
 
-    # Cut random chips along the edges
-    n_chips = max(0, rng.poisson(config.chip_count))
-    edge_margin_y = max(1, int(h * 0.1))
-    edge_margin_x = max(1, int(w * 0.1))
+    # Build mask: pixel is inside if it satisfies all four edge constraints
+    yy = np.arange(h, dtype=np.float64)[:, np.newaxis]
+    xx = np.arange(w, dtype=np.float64)[np.newaxis, :]
 
-    for _ in range(n_chips):
-        side = rng.randint(4)
-        if side == 0:  # top
-            cx = rng.randint(0, w)
-            cy = rng.randint(0, edge_margin_y)
-        elif side == 1:  # bottom
-            cx = rng.randint(0, w)
-            cy = h - 1 - rng.randint(0, edge_margin_y)
-        elif side == 2:  # left
-            cx = rng.randint(0, edge_margin_x)
-            cy = rng.randint(0, h)
-        else:  # right
-            cx = w - 1 - rng.randint(0, edge_margin_x)
-            cy = rng.randint(0, h)
+    inside = (
+        (yy > top_y[np.newaxis, :]) &
+        (yy < bot_y[np.newaxis, :]) &
+        (xx > left_x[:, np.newaxis]) &
+        (xx < right_x[:, np.newaxis])
+    )
 
-        chip_r = max(1, int(h * rng.uniform(0.01, 0.04)))
-        yy, xx = np.ogrid[0:h, 0:w]
-        chip = ((xx - cx) ** 2 + (yy - cy) ** 2) <= chip_r ** 2
-        final_mask[chip] = 0
+    img = Image.fromarray((inside.astype(np.uint8) * 255))
 
-    return Image.fromarray((np.clip(final_mask, 0, 1) * 255).astype(np.uint8))
+    # Smooth to soften staircase edges and slightly round corners
+    blur_r = max(1, int(h * 0.006))
+    img = img.filter(ImageFilter.GaussianBlur(radius=blur_r))
+
+    return img
 
 
 def _generate_stone_texture(w, h, config, rng):
@@ -430,6 +431,28 @@ def _apply_weathering(stone, tablet_mask, config, rng):
         dtype=np.float64
     ) / 255.0
     stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
+
+    # --- Pitting (small surface imperfections) ---
+    if config.pit_density > 0:
+        n_pits = int(config.pit_density * h * w / 500)
+        px = rng.randint(0, w, size=n_pits)
+        py = rng.randint(0, h, size=n_pits)
+        pr = np.maximum(1, rng.exponential(1.5, size=n_pits).astype(int))
+        pd = rng.uniform(0.85, 0.95, size=n_pits)
+
+        pit_factor = np.ones((h, w), dtype=np.float64)
+        for i in range(n_pits):
+            if mask_arr[py[i], px[i]] < 0.5:
+                continue
+            y1 = max(0, py[i] - pr[i])
+            y2 = min(h, py[i] + pr[i] + 1)
+            x1 = max(0, px[i] - pr[i])
+            x2 = min(w, px[i] + pr[i] + 1)
+            pit_factor[y1:y2, x1:x2] = np.minimum(
+                pit_factor[y1:y2, x1:x2], pd[i]
+            )
+
+        stone *= pit_factor[:, :, np.newaxis]
 
     return np.clip(stone, 0, 1)
 
