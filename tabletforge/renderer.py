@@ -18,7 +18,6 @@ class TabletConfig:
 
     # Tablet shape
     padding: float = 0.15
-    corner_radius: float = 0.06
     edge_roughness: float = 0.4
 
     # Stone appearance
@@ -130,61 +129,89 @@ def render(text, font_dir, height, seed=None, config=None):
 def _generate_tablet_mask(w, h, config, rng):
     """Generate the tablet silhouette with crumbly, irregular edges.
 
-    Uses four independent 1D noise profiles (one per edge) to create
-    genuinely irregular boundaries rather than a modulated rectangle.
+    Traces the perimeter of a rounded rectangle (with a random corner
+    radius driven by the seed) and displaces each point along its
+    outward normal using fractal noise.
     """
+    # Random corner radius, scaled to image size
+    corner_r = rng.uniform(h * 0.02, h * 0.15)
+    corner_r = min(corner_r, min(w, h) * 0.2)
+
     if config.edge_roughness <= 0:
         img = Image.new('L', (w, h), 0)
         draw = ImageDraw.Draw(img)
-        r = max(1, int(h * config.corner_radius))
-        draw.rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=255)
+        draw.rounded_rectangle([0, 0, w - 1, h - 1],
+                               radius=int(corner_r), fill=255)
         return img
 
-    # Leave room at canvas edges for outward displacement
-    margin = max(3, int(h * 0.06 * config.edge_roughness))
+    # Margin so outward displacement stays on canvas
+    margin = max(4, int(h * 0.08 * config.edge_roughness))
 
-    # Displacement amplitudes (scale with size and roughness)
-    amp_large = h * 0.10 * config.edge_roughness
-    amp_fine = h * 0.04 * config.edge_roughness
+    # Base rounded-rect bounds
+    x0, y0 = float(margin), float(margin)
+    x1, y1 = float(w - 1 - margin), float(h - 1 - margin)
+    r = min(corner_r, (x1 - x0) / 2, (y1 - y0) / 2)
 
-    def _edge_noise(length):
-        """Fractal 1D displacement profile centred on zero."""
-        lg = fbm_2d(1, length, octaves=3,
-                    base_scale=max(2, length * 0.3),
-                    persistence=0.5, rng=rng)[0]
-        fn = fbm_2d(1, length, octaves=5,
-                    base_scale=max(2, length * 0.07),
-                    persistence=0.55, rng=rng)[0]
-        return (lg - 0.5) * amp_large + (fn - 0.5) * amp_fine
+    # --- Trace perimeter (clockwise) as (x, y, nx, ny) ---
+    step = max(1.0, h * 0.004)
+    perimeter = []
 
-    # Base edge positions (inset from canvas border)
-    top_base = float(margin)
-    bot_base = float(h - 1 - margin)
-    left_base = float(margin)
-    right_base = float(w - 1 - margin)
+    def _arc(cx, cy, start_angle, end_angle):
+        """Append arc points with radial outward normals."""
+        n_pts = max(4, int(r * abs(end_angle - start_angle) / step))
+        for a in np.linspace(start_angle, end_angle, n_pts):
+            perimeter.append((cx + r * np.cos(a), cy + r * np.sin(a),
+                              np.cos(a), np.sin(a)))
 
-    # Displaced edge positions (noise pushes edges inward)
-    top_y = top_base + _edge_noise(w)
-    bot_y = bot_base - _edge_noise(w)
-    left_x = left_base + _edge_noise(h)
-    right_x = right_base - _edge_noise(h)
+    # Top edge (left → right)
+    for x in np.arange(x0 + r, x1 - r + 0.5, step):
+        perimeter.append((x, y0, 0.0, -1.0))
+    # Top-right corner
+    _arc(x1 - r, y0 + r, -np.pi / 2, 0)
+    # Right edge (top → bottom)
+    for y in np.arange(y0 + r, y1 - r + 0.5, step):
+        perimeter.append((x1, y, 1.0, 0.0))
+    # Bottom-right corner
+    _arc(x1 - r, y1 - r, 0, np.pi / 2)
+    # Bottom edge (right → left)
+    for x in np.arange(x1 - r, x0 + r - 0.5, -step):
+        perimeter.append((x, y1, 0.0, 1.0))
+    # Bottom-left corner
+    _arc(x0 + r, y1 - r, np.pi / 2, np.pi)
+    # Left edge (bottom → top)
+    for y in np.arange(y1 - r, y0 + r - 0.5, -step):
+        perimeter.append((x0, y, -1.0, 0.0))
+    # Top-left corner
+    _arc(x0 + r, y0 + r, np.pi, 3 * np.pi / 2)
 
-    # Build mask: pixel is inside if it satisfies all four edge constraints
-    yy = np.arange(h, dtype=np.float64)[:, np.newaxis]
-    xx = np.arange(w, dtype=np.float64)[np.newaxis, :]
+    n_pts = len(perimeter)
+    if n_pts < 3:
+        img = Image.new('L', (w, h), 0)
+        return img
 
-    inside = (
-        (yy > top_y[np.newaxis, :]) &
-        (yy < bot_y[np.newaxis, :]) &
-        (xx > left_x[:, np.newaxis]) &
-        (xx < right_x[:, np.newaxis])
-    )
+    # --- 1D fractal noise along the perimeter ---
+    amp_large = h * 0.14 * config.edge_roughness
+    amp_fine = h * 0.06 * config.edge_roughness
 
-    img = Image.fromarray((inside.astype(np.uint8) * 255))
+    lg = fbm_2d(1, n_pts, octaves=3,
+                base_scale=max(2, n_pts * 0.25),
+                persistence=0.5, rng=rng)[0]
+    fn = fbm_2d(1, n_pts, octaves=6,
+                base_scale=max(2, n_pts * 0.05),
+                persistence=0.55, rng=rng)[0]
+    disp = (lg - 0.5) * amp_large + (fn - 0.5) * amp_fine
 
-    # Smooth to soften staircase edges and slightly round corners
-    blur_r = max(1, int(h * 0.006))
-    img = img.filter(ImageFilter.GaussianBlur(radius=blur_r))
+    # Displace each point along its outward normal
+    poly = [(px + nx * d, py + ny * d)
+            for (px, py, nx, ny), d in zip(perimeter, disp)]
+
+    # Render filled polygon
+    img = Image.new('L', (w, h), 0)
+    draw = ImageDraw.Draw(img)
+    draw.polygon(poly, fill=255)
+
+    # Minimal anti-alias blur (just 1px to soften staircase)
+    img = img.filter(ImageFilter.GaussianBlur(radius=1))
 
     return img
 
