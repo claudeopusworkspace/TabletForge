@@ -126,23 +126,15 @@ def render(text, font_dir, height, seed=None, config=None):
 # Internal pipeline stages
 # ---------------------------------------------------------------------------
 
-def _generate_tablet_mask(w, h, config, rng):
-    """Generate the tablet silhouette with crumbly, irregular edges.
+def _build_tablet_polygon(w, h, config, rng):
+    """Build the displaced polygon for a crumbly tablet outline.
 
-    Traces the perimeter of a rounded rectangle (with a random corner
-    radius driven by the seed) and displaces each point along its
-    outward normal using fractal noise.
+    Returns a list of (x, y) tuples tracing the tablet perimeter.
+    Separated from mask rendering so it can be tested directly.
     """
     # Random corner radius, scaled to image size
     corner_r = rng.uniform(h * 0.02, h * 0.15)
     corner_r = min(corner_r, min(w, h) * 0.2)
-
-    if config.edge_roughness <= 0:
-        img = Image.new('L', (w, h), 0)
-        draw = ImageDraw.Draw(img)
-        draw.rounded_rectangle([0, 0, w - 1, h - 1],
-                               radius=int(corner_r), fill=255)
-        return img
 
     # Margin so outward displacement stays on canvas
     margin = max(4, int(h * 0.12 * config.edge_roughness))
@@ -158,27 +150,27 @@ def _generate_tablet_mask(w, h, config, rng):
 
     def _arc(cx, cy, start_angle, end_angle):
         """Append arc points with radial outward normals."""
-        n_pts = max(4, int(r * abs(end_angle - start_angle) / step))
-        for a in np.linspace(start_angle, end_angle, n_pts):
+        n_arc = max(4, int(r * abs(end_angle - start_angle) / step))
+        for a in np.linspace(start_angle, end_angle, n_arc):
             perimeter.append((cx + r * np.cos(a), cy + r * np.sin(a),
                               np.cos(a), np.sin(a)))
 
-    # Top edge (left → right)
+    # Top edge (left -> right)
     for x in np.arange(x0 + r, x1 - r + 0.5, step):
         perimeter.append((x, y0, 0.0, -1.0))
     # Top-right corner
     _arc(x1 - r, y0 + r, -np.pi / 2, 0)
-    # Right edge (top → bottom)
+    # Right edge (top -> bottom)
     for y in np.arange(y0 + r, y1 - r + 0.5, step):
         perimeter.append((x1, y, 1.0, 0.0))
     # Bottom-right corner
     _arc(x1 - r, y1 - r, 0, np.pi / 2)
-    # Bottom edge (right → left)
+    # Bottom edge (right -> left)
     for x in np.arange(x1 - r, x0 + r - 0.5, -step):
         perimeter.append((x, y1, 0.0, 1.0))
     # Bottom-left corner
     _arc(x0 + r, y1 - r, np.pi / 2, np.pi)
-    # Left edge (bottom → top)
+    # Left edge (bottom -> top)
     for y in np.arange(y1 - r, y0 + r - 0.5, -step):
         perimeter.append((x0, y, -1.0, 0.0))
     # Top-left corner
@@ -186,8 +178,7 @@ def _generate_tablet_mask(w, h, config, rng):
 
     n_pts = len(perimeter)
     if n_pts < 3:
-        img = Image.new('L', (w, h), 0)
-        return img
+        return []
 
     # --- 1D fractal noise along the perimeter ---
     amp_large = h * 0.20 * config.edge_roughness
@@ -213,19 +204,14 @@ def _generate_tablet_mask(w, h, config, rng):
 
     for _ in range(n_bites):
         center = rng.randint(0, n_pts)
-        # Width in perimeter points (narrow to wide)
         width = rng.uniform(n_pts * 0.01, n_pts * 0.06)
-        # Depth (always inward)
         depth = h * rng.uniform(0.02, 0.10) * config.edge_roughness
 
-        # Wrapped distance from bite center
         dist = np.abs(indices - center)
         dist = np.minimum(dist, n_pts - dist)
 
-        # Gaussian bite profile
         bite = depth * np.exp(-0.5 * (dist / max(1.0, width)) ** 2)
 
-        # Some bites get extra jaggedness on top
         if rng.random() > 0.4:
             jag = fbm_2d(1, n_pts, octaves=4,
                          base_scale=max(2, n_pts * 0.03),
@@ -233,22 +219,41 @@ def _generate_tablet_mask(w, h, config, rng):
             jag_amp = depth * rng.uniform(0.2, 0.6)
             bite += (jag - 0.5) * jag_amp * (bite / max(depth, 1e-6))
 
-        # Subtract = push inward (normal points outward)
         disp -= bite
 
-    # Blend the seam so the last perimeter point connects smoothly
-    # back to the first (they are physically adjacent on the polygon)
+    # Blend the seam: smoothly ramp the last blend_n displacement
+    # values toward disp[0] so the polygon closes without a step.
     blend_n = max(8, n_pts // 20)
     for i in range(blend_n):
-        t = i / blend_n
-        idx_end = n_pts - blend_n + i
-        disp[idx_end] = disp[idx_end] * (1.0 - t) + disp[i] * t
+        t = (i + 1) / (blend_n + 1)
+        idx = n_pts - blend_n + i
+        disp[idx] = disp[idx] * (1.0 - t) + disp[0] * t
 
     # Displace each point along its outward normal
-    poly = [(px + nx * d, py + ny * d)
+    return [(px + nx * d, py + ny * d)
             for (px, py, nx, ny), d in zip(perimeter, disp)]
 
-    # Render filled polygon
+
+def _generate_tablet_mask(w, h, config, rng):
+    """Generate the tablet silhouette with crumbly, irregular edges.
+
+    Traces the perimeter of a rounded rectangle (with a random corner
+    radius driven by the seed) and displaces each point along its
+    outward normal using fractal noise.
+    """
+    if config.edge_roughness <= 0:
+        corner_r = rng.uniform(h * 0.02, h * 0.15)
+        corner_r = min(corner_r, min(w, h) * 0.2)
+        img = Image.new('L', (w, h), 0)
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle([0, 0, w - 1, h - 1],
+                               radius=int(corner_r), fill=255)
+        return img
+
+    poly = _build_tablet_polygon(w, h, config, rng)
+    if len(poly) < 3:
+        return Image.new('L', (w, h), 0)
+
     img = Image.new('L', (w, h), 0)
     draw = ImageDraw.Draw(img)
     draw.polygon(poly, fill=255)
