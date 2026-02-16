@@ -53,7 +53,6 @@ def main():
         kwargs["stone_color"] = tuple(args.stone_color)
     if args.weathering is not None:
         kwargs["crack_density"] = args.weathering
-        kwargs["pit_density"] = args.weathering
         kwargs["wear"] = args.weathering
         kwargs["edge_roughness"] = min(args.weathering, 0.8)
     if args.carve_depth is not None:

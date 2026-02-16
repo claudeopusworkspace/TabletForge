@@ -33,8 +33,10 @@ class TabletConfig:
 
     # Weathering
     crack_density: float = 0.4
-    pit_density: float = 0.3
     wear: float = 0.5
+
+    # Edge bevel
+    edge_bevel: float = 0.6
 
     # Lighting
     light_angle: float = 315.0
@@ -108,13 +110,16 @@ def render(text, font_dir, height, seed=None, config=None):
     # 5. Carving effect
     stone = _apply_carving(stone, text_mask, config, canvas_h)
 
-    # 6. Weathering (cracks and pits)
+    # 6. Weathering (cracks)
     stone = _apply_weathering(stone, tablet_mask, config, rng)
 
-    # 7. Edge darkening
+    # 7. Edge bevel (3D raised-slab look)
+    stone = _apply_edge_bevel(stone, tablet_mask, config, canvas_h)
+
+    # 8. Edge darkening
     stone = _apply_edge_darkening(stone, tablet_mask, canvas_h)
 
-    # 8. Final composite
+    # 9. Final composite
     return _composite(stone, tablet_mask)
 
 
@@ -385,65 +390,87 @@ def _apply_veins(stone, w, h, config, rng):
 
 
 def _apply_weathering(stone, tablet_mask, config, rng):
-    """Add cracks and surface pitting."""
+    """Add cracks to the stone surface."""
     h, w = stone.shape[:2]
     mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
 
-    # --- Cracks ---
-    if config.crack_density > 0:
-        crack_img = Image.new('L', (w, h), 0)
-        draw = ImageDraw.Draw(crack_img)
-        n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
+    if config.crack_density <= 0:
+        return stone
 
-        for _ in range(n_cracks):
-            sx = rng.randint(0, w)
-            sy = rng.randint(0, h)
-            if mask_arr[sy, sx] < 0.5:
-                continue
+    crack_img = Image.new('L', (w, h), 0)
+    draw = ImageDraw.Draw(crack_img)
+    n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
 
-            angle = rng.uniform(0, 2 * np.pi)
-            pts = [(sx, sy)]
-            length = int(h * rng.uniform(0.05, 0.25))
+    for _ in range(n_cracks):
+        sx = rng.randint(0, w)
+        sy = rng.randint(0, h)
+        if mask_arr[sy, sx] < 0.5:
+            continue
 
-            for _ in range(length):
-                sx += np.cos(angle) * 1.5
-                sy += np.sin(angle) * 1.5
-                angle += rng.uniform(-0.3, 0.3)
-                ix, iy = int(sx), int(sy)
-                if ix < 0 or ix >= w or iy < 0 or iy >= h:
-                    break
-                if mask_arr[iy, ix] < 0.5:
-                    break
-                pts.append((ix, iy))
+        angle = rng.uniform(0, 2 * np.pi)
+        pts = [(sx, sy)]
+        length = int(h * rng.uniform(0.05, 0.25))
 
-            if len(pts) > 2:
-                draw.line(pts, fill=200, width=1)
+        for _ in range(length):
+            sx += np.cos(angle) * 1.5
+            sy += np.sin(angle) * 1.5
+            angle += rng.uniform(-0.3, 0.3)
+            ix, iy = int(sx), int(sy)
+            if ix < 0 or ix >= w or iy < 0 or iy >= h:
+                break
+            if mask_arr[iy, ix] < 0.5:
+                break
+            pts.append((ix, iy))
 
-        crack_mask = np.array(
-            crack_img.filter(ImageFilter.GaussianBlur(radius=0.7)),
-            dtype=np.float64
-        ) / 255.0
-        stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
+        if len(pts) > 2:
+            draw.line(pts, fill=200, width=1)
 
-    # --- Pitting ---
-    if config.pit_density > 0:
-        n_pits = int(config.pit_density * h * w / 500)
-        px = rng.randint(0, w, size=n_pits)
-        py = rng.randint(0, h, size=n_pits)
-        pr = np.maximum(1, rng.exponential(1.5, size=n_pits).astype(int))
-        pd = rng.uniform(0.85, 0.95, size=n_pits)
+    crack_mask = np.array(
+        crack_img.filter(ImageFilter.GaussianBlur(radius=0.7)),
+        dtype=np.float64
+    ) / 255.0
+    stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
 
-        pit_factor = np.ones((h, w), dtype=np.float64)
-        for i in range(n_pits):
-            if mask_arr[py[i], px[i]] < 0.5:
-                continue
-            y1, y2 = max(0, py[i] - pr[i]), min(h, py[i] + pr[i] + 1)
-            x1, x2 = max(0, px[i] - pr[i]), min(w, px[i] + pr[i] + 1)
-            pit_factor[y1:y2, x1:x2] = np.minimum(
-                pit_factor[y1:y2, x1:x2], pd[i]
-            )
+    return np.clip(stone, 0, 1)
 
-        stone *= pit_factor[:, :, np.newaxis]
+
+def _apply_edge_bevel(stone, tablet_mask, config, height):
+    """Emboss the tablet edges to give the slab a 3D raised appearance."""
+    if config.edge_bevel <= 0:
+        return stone
+
+    h, w = stone.shape[:2]
+    mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
+
+    # Blur the tablet mask to create an edge depth ramp
+    bevel_r = max(2, int(height * 0.025 * config.edge_bevel))
+    bevel_depth = np.array(
+        tablet_mask.filter(ImageFilter.GaussianBlur(radius=bevel_r)),
+        dtype=np.float64
+    ) / 255.0
+
+    # Compute gradients of the depth ramp
+    dy = np.zeros_like(bevel_depth)
+    dx = np.zeros_like(bevel_depth)
+    dy[1:, :] = bevel_depth[1:, :] - bevel_depth[:-1, :]
+    dx[:, 1:] = bevel_depth[:, 1:] - bevel_depth[:, :-1]
+
+    # Same light direction as carving
+    rad = np.radians(config.light_angle)
+    light_x = np.cos(rad)
+    light_y = -np.sin(rad)
+
+    emboss = dx * light_x + dy * light_y
+    max_val = np.abs(emboss).max()
+    if max_val > 0:
+        emboss /= max_val
+
+    # Only apply in the edge zone (where mask is between 0 and ~1)
+    edge_zone = (mask_arr > 0.01) & (bevel_depth < 0.95)
+    emboss *= edge_zone.astype(np.float64)
+    emboss *= config.edge_bevel * config.light_intensity
+
+    stone += emboss[:, :, np.newaxis] * 0.45
 
     return np.clip(stone, 0, 1)
 
