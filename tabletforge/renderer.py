@@ -145,7 +145,7 @@ def _generate_tablet_mask(w, h, config, rng):
         return img
 
     # Margin so outward displacement stays on canvas
-    margin = max(4, int(h * 0.08 * config.edge_roughness))
+    margin = max(4, int(h * 0.12 * config.edge_roughness))
 
     # Base rounded-rect bounds
     x0, y0 = float(margin), float(margin)
@@ -190,8 +190,8 @@ def _generate_tablet_mask(w, h, config, rng):
         return img
 
     # --- 1D fractal noise along the perimeter ---
-    amp_large = h * 0.14 * config.edge_roughness
-    amp_fine = h * 0.06 * config.edge_roughness
+    amp_large = h * 0.20 * config.edge_roughness
+    amp_fine = h * 0.09 * config.edge_roughness
 
     lg = fbm_2d(1, n_pts, octaves=3,
                 base_scale=max(2, n_pts * 0.25),
@@ -200,6 +200,15 @@ def _generate_tablet_mask(w, h, config, rng):
                 base_scale=max(2, n_pts * 0.05),
                 persistence=0.55, rng=rng)[0]
     disp = (lg - 0.5) * amp_large + (fn - 0.5) * amp_fine
+
+    # Blend the seam so the last perimeter point connects smoothly
+    # back to the first (they are physically adjacent on the polygon)
+    blend_n = max(8, n_pts // 20)
+    for i in range(blend_n):
+        t = i / blend_n
+        # Blend end → start
+        idx_end = n_pts - blend_n + i
+        disp[idx_end] = disp[idx_end] * (1.0 - t) + disp[i] * t
 
     # Displace each point along its outward normal
     poly = [(px + nx * d, py + ny * d)
