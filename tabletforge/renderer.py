@@ -532,7 +532,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
                     # Start a few px backward (outward) so the V
                     # opening extends past the tablet edge.
-                    back = 5.0
+                    back = 10.0
                     pts = [(sx - np.cos(angle) * back,
                             sy - np.sin(angle) * back),
                            (sx, sy)]
@@ -580,11 +580,11 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                             base_hw = (mid_width * (1 - frac)
                                        + 1.0 * frac) / 2
 
-                        # Jaggedness (independent per side)
+                        # Jaggedness (independent per side, dampened)
                         if t < 0.45:
-                            jag_amp = base_hw * 0.6
+                            jag_amp = base_hw * 0.3
                         elif t < 0.8:
-                            jag_amp = base_hw * 0.15
+                            jag_amp = base_hw * 0.08
                         else:
                             jag_amp = 0.0
 
