@@ -109,8 +109,8 @@ def render(text, font_dir, height, seed=None, config=None):
     # 5. Carving effect
     stone = _apply_carving(stone, text_mask, config, canvas_h)
 
-    # 6. Weathering (cracks)
-    stone = _apply_weathering(stone, tablet_mask, config, rng)
+    # 6. Weathering (cracks – may cut into the tablet mask)
+    stone, tablet_mask = _apply_weathering(stone, tablet_mask, config, rng)
 
     # 7. Edge bevel (3D raised-slab look)
     stone = _apply_edge_bevel(stone, tablet_mask, config, canvas_h)
@@ -472,14 +472,23 @@ def _apply_weathering(stone, tablet_mask, config, rng):
       - First 20%: wide V-shaped bite, very rough/jagged edges
       - Middle 60%: slightly wider than 1px
       - Last 20%: tapers to 1px at the tip
+
+    The first ~5 px of each crack (at the perimeter) are cut out of
+    the tablet mask so that small chunks are actually missing.
+
+    Returns (stone, tablet_mask) — the mask may be modified.
     """
     h, w = stone.shape[:2]
     mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
 
     if config.crack_density > 0:
         crack_img = Image.new('L', (w, h), 0)
-        draw = ImageDraw.Draw(crack_img)
+        crack_draw = ImageDraw.Draw(crack_img)
+        cutout_img = Image.new('L', (w, h), 0)
+        cutout_draw = ImageDraw.Draw(cutout_img)
+
         n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
+        cutout_depth = 5.0   # px of crack that are fully transparent
 
         if n_cracks > 0:
             # Find edge pixels (interior with at least one exterior neighbor)
@@ -536,6 +545,13 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     if len(pts) < 3:
                         continue
 
+                    # --- Cumulative path distance (for cutout threshold) ---
+                    cum_dist = [0.0]
+                    for j in range(1, len(pts)):
+                        d = np.sqrt((pts[j][0] - pts[j - 1][0]) ** 2
+                                    + (pts[j][1] - pts[j - 1][1]) ** 2)
+                        cum_dist.append(cum_dist[-1] + d)
+
                     # --- Build variable-width polygon along the crack ---
                     total = len(pts)
                     v_width = h * rng.uniform(0.015, 0.04)
@@ -587,22 +603,50 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                         right_side.append(
                             (px - nx * right_hw, py - ny * right_hw))
 
+                    # Draw full crack on the darkening layer
                     poly = left_side + right_side[::-1]
                     if len(poly) >= 3:
-                        draw.polygon(
+                        crack_draw.polygon(
                             [(int(round(x)), int(round(y)))
                              for x, y in poly],
                             fill=200,
                         )
 
+                    # Draw cutout polygon (first ~cutout_depth px of path)
+                    cutout_end = 0
+                    for j, d in enumerate(cum_dist):
+                        if d > cutout_depth:
+                            break
+                        cutout_end = j
+                    if cutout_end >= 2:
+                        cutout_poly = (left_side[:cutout_end + 1]
+                                       + right_side[:cutout_end + 1][::-1])
+                        cutout_draw.polygon(
+                            [(int(round(x)), int(round(y)))
+                             for x, y in cutout_poly],
+                            fill=255,
+                        )
+
+        # Darken stone along cracks
         crack_mask = np.array(
             crack_img.filter(ImageFilter.GaussianBlur(radius=0.7)),
             dtype=np.float64
         ) / 255.0
         stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
 
+        # Cut the entry chunks out of the tablet mask (soft edge)
+        cutout_arr = np.array(
+            cutout_img.filter(ImageFilter.GaussianBlur(radius=1.5)),
+            dtype=np.float64
+        ) / 255.0
+        mask_mod = mask_arr - cutout_arr
+        np.clip(mask_mod, 0, 1, out=mask_mod)
+        tablet_mask = Image.fromarray(
+            (mask_mod * 255).astype(np.uint8), mode='L')
+
     # --- Pitting (small surface imperfections) ---
     if config.pit_density > 0:
+        mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
         n_pits = int(config.pit_density * h * w / 500)
         px = rng.randint(0, w, size=n_pits)
         py = rng.randint(0, h, size=n_pits)
@@ -623,7 +667,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
         stone *= pit_factor[:, :, np.newaxis]
 
-    return np.clip(stone, 0, 1)
+    return np.clip(stone, 0, 1), tablet_mask
 
 
 def _apply_edge_bevel(stone, tablet_mask, config, height):
