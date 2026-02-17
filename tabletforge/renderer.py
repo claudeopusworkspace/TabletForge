@@ -466,46 +466,140 @@ def _apply_veins(stone, w, h, config, rng):
 
 
 def _apply_weathering(stone, tablet_mask, config, rng):
-    """Add cracks to the stone surface."""
+    """Add cracks and pitting to the stone surface.
+
+    Cracks originate from the tablet perimeter and taper inward:
+      - First 20%: wide V-shaped bite, very rough/jagged edges
+      - Middle 60%: slightly wider than 1px
+      - Last 20%: tapers to 1px at the tip
+    """
     h, w = stone.shape[:2]
     mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
 
-    if config.crack_density <= 0:
-        return stone
+    if config.crack_density > 0:
+        crack_img = Image.new('L', (w, h), 0)
+        draw = ImageDraw.Draw(crack_img)
+        n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
 
-    crack_img = Image.new('L', (w, h), 0)
-    draw = ImageDraw.Draw(crack_img)
-    n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
+        if n_cracks > 0:
+            # Find edge pixels (interior with at least one exterior neighbor)
+            interior = mask_arr > 0.5
+            fully_interior = interior.copy()
+            fully_interior[1:, :] &= interior[:-1, :]
+            fully_interior[:-1, :] &= interior[1:, :]
+            fully_interior[:, 1:] &= interior[:, :-1]
+            fully_interior[:, :-1] &= interior[:, 1:]
+            edge_pixels = interior & ~fully_interior
+            edge_ys, edge_xs = np.where(edge_pixels)
 
-    for _ in range(n_cracks):
-        sx = rng.randint(0, w)
-        sy = rng.randint(0, h)
-        if mask_arr[sy, sx] < 0.5:
-            continue
+            if len(edge_ys) > 0:
+                # Blurred mask gradient → inward direction
+                blur_r = max(3, h // 20)
+                dist_arr = np.array(
+                    tablet_mask.filter(
+                        ImageFilter.GaussianBlur(radius=blur_r)),
+                    dtype=np.float64
+                ) / 255.0
+                grad_y = np.zeros_like(dist_arr)
+                grad_x = np.zeros_like(dist_arr)
+                grad_y[1:-1, :] = (dist_arr[2:, :] - dist_arr[:-2, :]) / 2
+                grad_x[:, 1:-1] = (dist_arr[:, 2:] - dist_arr[:, :-2]) / 2
 
-        angle = rng.uniform(0, 2 * np.pi)
-        pts = [(sx, sy)]
-        length = int(h * rng.uniform(0.05, 0.25))
+                for _ in range(n_cracks):
+                    idx = rng.randint(0, len(edge_ys))
+                    sx, sy = float(edge_xs[idx]), float(edge_ys[idx])
 
-        for _ in range(length):
-            sx += np.cos(angle) * 1.5
-            sy += np.sin(angle) * 1.5
-            angle += rng.uniform(-0.3, 0.3)
-            ix, iy = int(sx), int(sy)
-            if ix < 0 or ix >= w or iy < 0 or iy >= h:
-                break
-            if mask_arr[iy, ix] < 0.5:
-                break
-            pts.append((ix, iy))
+                    # Walk direction: generally inward + randomness
+                    iy_c = min(h - 1, max(0, int(sy)))
+                    ix_c = min(w - 1, max(0, int(sx)))
+                    gx = grad_x[iy_c, ix_c]
+                    gy = grad_y[iy_c, ix_c]
+                    if abs(gx) + abs(gy) > 0.001:
+                        angle = np.arctan2(gy, gx) + rng.uniform(-0.5, 0.5)
+                    else:
+                        angle = rng.uniform(0, 2 * np.pi)
 
-        if len(pts) > 2:
-            draw.line(pts, fill=200, width=1)
+                    crack_len = int(h * rng.uniform(0.05, 0.25))
+                    pts = [(sx, sy)]
 
-    crack_mask = np.array(
-        crack_img.filter(ImageFilter.GaussianBlur(radius=0.7)),
-        dtype=np.float64
-    ) / 255.0
-    stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
+                    for _ in range(crack_len):
+                        sx += np.cos(angle) * 1.5
+                        sy += np.sin(angle) * 1.5
+                        angle += rng.uniform(-0.3, 0.3)
+                        ix, iy = int(sx), int(sy)
+                        if ix < 0 or ix >= w or iy < 0 or iy >= h:
+                            break
+                        if mask_arr[iy, ix] < 0.5:
+                            break
+                        pts.append((sx, sy))
+
+                    if len(pts) < 3:
+                        continue
+
+                    # --- Build variable-width polygon along the crack ---
+                    total = len(pts)
+                    v_width = h * rng.uniform(0.015, 0.04)
+                    mid_width = h * rng.uniform(0.004, 0.010)
+
+                    left_side = []
+                    right_side = []
+
+                    for i, (px, py) in enumerate(pts):
+                        t = i / max(1, total - 1)
+
+                        # Width profile
+                        if t < 0.2:
+                            frac = t / 0.2
+                            base_hw = (v_width * (1 - frac)
+                                       + mid_width * frac) / 2
+                        elif t < 0.8:
+                            base_hw = mid_width / 2
+                        else:
+                            frac = (t - 0.8) / 0.2
+                            base_hw = (mid_width * (1 - frac)
+                                       + 1.0 * frac) / 2
+
+                        # Jaggedness (independent per side)
+                        if t < 0.25:
+                            jag_amp = base_hw * 0.6
+                        elif t < 0.8:
+                            jag_amp = base_hw * 0.15
+                        else:
+                            jag_amp = 0.0
+
+                        left_hw = max(0.3, base_hw
+                                      + rng.uniform(-jag_amp, jag_amp))
+                        right_hw = max(0.3, base_hw
+                                       + rng.uniform(-jag_amp, jag_amp))
+
+                        # Perpendicular direction
+                        if i < total - 1:
+                            dx = pts[i + 1][0] - px
+                            dy = pts[i + 1][1] - py
+                        else:
+                            dx = px - pts[i - 1][0]
+                            dy = py - pts[i - 1][1]
+                        mag = max(0.001, np.sqrt(dx * dx + dy * dy))
+                        nx, ny = -dy / mag, dx / mag
+
+                        left_side.append(
+                            (px + nx * left_hw, py + ny * left_hw))
+                        right_side.append(
+                            (px - nx * right_hw, py - ny * right_hw))
+
+                    poly = left_side + right_side[::-1]
+                    if len(poly) >= 3:
+                        draw.polygon(
+                            [(int(round(x)), int(round(y)))
+                             for x, y in poly],
+                            fill=200,
+                        )
+
+        crack_mask = np.array(
+            crack_img.filter(ImageFilter.GaussianBlur(radius=0.7)),
+            dtype=np.float64
+        ) / 255.0
+        stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
 
     # --- Pitting (small surface imperfections) ---
     if config.pit_density > 0:
