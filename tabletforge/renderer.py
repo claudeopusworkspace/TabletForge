@@ -536,8 +536,19 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                 grad_y[1:-1, :] = (dist_arr[2:, :] - dist_arr[:-2, :]) / 2
                 grad_x[:, 1:-1] = (dist_arr[:, 2:] - dist_arr[:, :-2]) / 2
 
+                # Reference resolution: all RNG is consumed as if
+                # rendering at ref_h, then coordinates are scaled to
+                # the actual resolution.  This keeps RNG consumption
+                # per crack deterministic regardless of output size.
+                ref_h = 1024
+                scale = h / ref_h
+
                 for _ in range(n_cracks):
-                    idx = crack_rng.randint(0, len(edge_ys))
+                    # Normalised edge-pixel selection so the same
+                    # relative perimeter position is chosen at any res.
+                    edge_frac = crack_rng.uniform(0, 1)
+                    idx = min(int(edge_frac * len(edge_ys)),
+                              len(edge_ys) - 1)
                     sx, sy = float(edge_xs[idx]), float(edge_ys[idx])
 
                     # Walk direction: generally inward + randomness
@@ -550,19 +561,34 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     else:
                         angle = crack_rng.uniform(0, 2 * np.pi)
 
-                    crack_len = int(h * crack_rng.uniform(0.05, 0.25))
+                    # Crack length at reference resolution (always
+                    # 51–256 steps) so every crack consumes the same
+                    # amount of RNG regardless of actual height.
+                    crack_len = int(ref_h * crack_rng.uniform(0.05, 0.25))
+
+                    # Pre-generate all per-step and per-point random
+                    # values so RNG consumption is fixed even if the
+                    # walk is trimmed by a boundary check.
+                    angle_deltas = crack_rng.uniform(
+                        -0.3, 0.3, size=crack_len)
+                    max_pts = crack_len + 2  # walk pts + 2 seed pts
+                    jag_left_raw = crack_rng.uniform(-1, 1, size=max_pts)
+                    jag_right_raw = crack_rng.uniform(-1, 1, size=max_pts)
+                    v_width = ref_h * crack_rng.uniform(0.04, 0.10) * scale
+                    mid_width = ref_h * crack_rng.uniform(0.004, 0.010) * scale
 
                     # Start a few px backward (outward) so the V
                     # opening extends past the tablet edge.
-                    back = 10.0
+                    back = 10.0 * scale
+                    step_size = 1.5 * scale
                     pts = [(sx - np.cos(angle) * back,
                             sy - np.sin(angle) * back),
                            (sx, sy)]
 
-                    for _ in range(crack_len):
-                        sx += np.cos(angle) * 1.5
-                        sy += np.sin(angle) * 1.5
-                        angle += crack_rng.uniform(-0.3, 0.3)
+                    for step_i in range(crack_len):
+                        sx += np.cos(angle) * step_size
+                        sy += np.sin(angle) * step_size
+                        angle += angle_deltas[step_i]
                         ix, iy = int(sx), int(sy)
                         if ix < 0 or ix >= w or iy < 0 or iy >= h:
                             break
@@ -575,8 +601,6 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
                     # --- Build variable-width polygon along the crack ---
                     total = len(pts)
-                    v_width = h * crack_rng.uniform(0.04, 0.10)
-                    mid_width = h * crack_rng.uniform(0.004, 0.010)
 
                     left_side = []
                     right_side = []
@@ -600,7 +624,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                         else:
                             frac = (t - 0.8) / 0.2
                             base_hw = (mid_width * (1 - frac)
-                                       + 1.0 * frac) / 2
+                                       + 1.0 * scale * frac) / 2
 
                         # Jaggedness (independent per side, dampened)
                         if t < 0.45:
@@ -610,10 +634,10 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                         else:
                             jag_amp = 0.0
 
-                        lhw = max(0.3, base_hw
-                                  + crack_rng.uniform(-jag_amp, jag_amp))
-                        rhw = max(0.3, base_hw
-                                  + crack_rng.uniform(-jag_amp, jag_amp))
+                        lhw = max(0.3 * scale,
+                                  base_hw + jag_left_raw[i] * jag_amp)
+                        rhw = max(0.3 * scale,
+                                  base_hw + jag_right_raw[i] * jag_amp)
 
                         # Perpendicular direction
                         if i < total - 1:
@@ -645,7 +669,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     # Cutout: transparent middle where crack is
                     # wider than 2*rim.  5 px of stone stays visible
                     # on each side; the interior is punched out.
-                    rim = 5.0
+                    rim = 5.0 * scale
                     co_left = []
                     co_right = []
                     has_cutout = False
