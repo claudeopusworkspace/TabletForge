@@ -66,6 +66,15 @@ def render(text, font_dir, height, seed=None, config=None):
         seed = np.random.randint(0, 2**31)
 
     rng = np.random.RandomState(seed)
+
+    # Derive per-stage seeds so resolution-dependent operations in one
+    # stage cannot shift the RNG state seen by later stages.
+    seed_mask    = rng.randint(0, 2**31)
+    seed_texture = rng.randint(0, 2**31)
+    seed_veins   = rng.randint(0, 2**31)
+    seed_text    = rng.randint(0, 2**31)
+    seed_weather = rng.randint(0, 2**31)
+
     text = text.upper()
 
     # Load font glyphs
@@ -94,23 +103,29 @@ def render(text, font_dir, height, seed=None, config=None):
     # --- Pipeline ---
 
     # 1. Tablet shape mask
-    tablet_mask = _generate_tablet_mask(canvas_w, canvas_h, config, rng)
+    tablet_mask = _generate_tablet_mask(
+        canvas_w, canvas_h, config, np.random.RandomState(seed_mask))
 
     # 2. Stone surface texture
-    stone = _generate_stone_texture(canvas_w, canvas_h, config, rng)
+    stone = _generate_stone_texture(
+        canvas_w, canvas_h, config, np.random.RandomState(seed_texture))
 
     # 3. Mineral veins
-    stone = _apply_veins(stone, canvas_w, canvas_h, config, rng)
+    stone = _apply_veins(
+        stone, canvas_w, canvas_h, config,
+        np.random.RandomState(seed_veins))
 
     # 4. Text mask
-    text_mask = _render_text(text, font, cell_size, pad_px,
-                             canvas_w, canvas_h, config, rng)
+    text_mask = _render_text(
+        text, font, cell_size, pad_px, canvas_w, canvas_h, config,
+        np.random.RandomState(seed_text))
 
     # 5. Carving effect
     stone = _apply_carving(stone, text_mask, config, canvas_h)
 
     # 6. Weathering (cracks – may cut into the tablet mask)
-    stone, tablet_mask = _apply_weathering(stone, tablet_mask, config, rng)
+    stone, tablet_mask = _apply_weathering(
+        stone, tablet_mask, config, np.random.RandomState(seed_weather))
 
     # 7. Edge bevel (3D raised-slab look)
     stone = _apply_edge_bevel(stone, tablet_mask, config, canvas_h)
@@ -482,13 +497,20 @@ def _apply_weathering(stone, tablet_mask, config, rng):
     h, w = stone.shape[:2]
     mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
 
+    # Sub-RNGs so crack generation (resolution-dependent walk lengths)
+    # cannot shift the state used by pitting.
+    seed_cracks = rng.randint(0, 2**31)
+    seed_pits   = rng.randint(0, 2**31)
+    crack_rng = np.random.RandomState(seed_cracks)
+    pit_rng   = np.random.RandomState(seed_pits)
+
     if config.crack_density > 0:
         crack_img = Image.new('L', (w, h), 0)
         crack_draw = ImageDraw.Draw(crack_img)
         cutout_img = Image.new('L', (w, h), 0)
         cutout_draw = ImageDraw.Draw(cutout_img)
 
-        n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
+        n_cracks = max(0, int(config.crack_density * 8 * crack_rng.poisson(2)))
 
         if n_cracks > 0:
             # Find edge pixels (interior with at least one exterior neighbor)
@@ -515,7 +537,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                 grad_x[:, 1:-1] = (dist_arr[:, 2:] - dist_arr[:, :-2]) / 2
 
                 for _ in range(n_cracks):
-                    idx = rng.randint(0, len(edge_ys))
+                    idx = crack_rng.randint(0, len(edge_ys))
                     sx, sy = float(edge_xs[idx]), float(edge_ys[idx])
 
                     # Walk direction: generally inward + randomness
@@ -524,11 +546,11 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     gx = grad_x[iy_c, ix_c]
                     gy = grad_y[iy_c, ix_c]
                     if abs(gx) + abs(gy) > 0.001:
-                        angle = np.arctan2(gy, gx) + rng.uniform(-0.5, 0.5)
+                        angle = np.arctan2(gy, gx) + crack_rng.uniform(-0.5, 0.5)
                     else:
-                        angle = rng.uniform(0, 2 * np.pi)
+                        angle = crack_rng.uniform(0, 2 * np.pi)
 
-                    crack_len = int(h * rng.uniform(0.05, 0.25))
+                    crack_len = int(h * crack_rng.uniform(0.05, 0.25))
 
                     # Start a few px backward (outward) so the V
                     # opening extends past the tablet edge.
@@ -540,7 +562,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     for _ in range(crack_len):
                         sx += np.cos(angle) * 1.5
                         sy += np.sin(angle) * 1.5
-                        angle += rng.uniform(-0.3, 0.3)
+                        angle += crack_rng.uniform(-0.3, 0.3)
                         ix, iy = int(sx), int(sy)
                         if ix < 0 or ix >= w or iy < 0 or iy >= h:
                             break
@@ -553,8 +575,8 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
                     # --- Build variable-width polygon along the crack ---
                     total = len(pts)
-                    v_width = h * rng.uniform(0.04, 0.10)
-                    mid_width = h * rng.uniform(0.004, 0.010)
+                    v_width = h * crack_rng.uniform(0.04, 0.10)
+                    mid_width = h * crack_rng.uniform(0.004, 0.010)
 
                     left_side = []
                     right_side = []
@@ -589,9 +611,9 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                             jag_amp = 0.0
 
                         lhw = max(0.3, base_hw
-                                  + rng.uniform(-jag_amp, jag_amp))
+                                  + crack_rng.uniform(-jag_amp, jag_amp))
                         rhw = max(0.3, base_hw
-                                  + rng.uniform(-jag_amp, jag_amp))
+                                  + crack_rng.uniform(-jag_amp, jag_amp))
 
                         # Perpendicular direction
                         if i < total - 1:
@@ -668,11 +690,17 @@ def _apply_weathering(stone, tablet_mask, config, rng):
     # --- Pitting (small surface imperfections) ---
     if config.pit_density > 0:
         mask_arr = np.array(tablet_mask, dtype=np.float64) / 255.0
-        n_pits = int(config.pit_density * h * w / 500)
-        px = rng.randint(0, w, size=n_pits)
-        py = rng.randint(0, h, size=n_pits)
-        pr = np.maximum(1, rng.exponential(1.5, size=n_pits).astype(int))
-        pd = rng.uniform(0.85, 0.95, size=n_pits)
+        # Fixed count independent of resolution
+        n_pits = int(config.pit_density * 200)
+        # Normalized positions scaled to canvas dimensions
+        px = (pit_rng.uniform(0, 1, size=n_pits) * w).astype(int)
+        py = (pit_rng.uniform(0, 1, size=n_pits) * h).astype(int)
+        np.clip(px, 0, w - 1, out=px)
+        np.clip(py, 0, h - 1, out=py)
+        # Radius scaled relative to reference height (256)
+        scale = h / 256.0
+        pr = np.maximum(1, (pit_rng.exponential(1.5, size=n_pits) * scale).astype(int))
+        pd = pit_rng.uniform(0.85, 0.95, size=n_pits)
 
         pit_factor = np.ones((h, w), dtype=np.float64)
         for i in range(n_pits):
