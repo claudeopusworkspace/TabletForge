@@ -547,7 +547,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
                     # --- Build variable-width polygon along the crack ---
                     total = len(pts)
-                    v_width = h * rng.uniform(0.015, 0.04)
+                    v_width = h * rng.uniform(0.04, 0.10)
                     mid_width = h * rng.uniform(0.004, 0.010)
 
                     left_side = []
@@ -559,9 +559,12 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     for i, (px, py) in enumerate(pts):
                         t = i / max(1, total - 1)
 
-                        # Width profile
-                        if t < 0.2:
-                            frac = t / 0.2
+                        # Width profile:
+                        #   0–40 %  V taper (wide → mid)
+                        #  40–80 %  moderate crack
+                        #  80–100%  taper to 1 px
+                        if t < 0.4:
+                            frac = t / 0.4
                             base_hw = (v_width * (1 - frac)
                                        + mid_width * frac) / 2
                         elif t < 0.8:
@@ -572,7 +575,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                                        + 1.0 * frac) / 2
 
                         # Jaggedness (independent per side)
-                        if t < 0.25:
+                        if t < 0.45:
                             jag_amp = base_hw * 0.6
                         elif t < 0.8:
                             jag_amp = base_hw * 0.15
