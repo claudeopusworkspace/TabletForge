@@ -582,7 +582,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
                         # Jaggedness (independent per side, dampened)
                         if t < 0.45:
-                            jag_amp = base_hw * 0.3
+                            jag_amp = base_hw * 0.2
                         elif t < 0.8:
                             jag_amp = base_hw * 0.08
                         else:
