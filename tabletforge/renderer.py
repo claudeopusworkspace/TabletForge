@@ -265,13 +265,23 @@ def _generate_tablet_mask(w, h, config, rng):
                                radius=int(corner_r), fill=255)
         return img
 
-    poly = _build_tablet_polygon(w, h, config, rng)
+    # Compute the polygon outline at a reference resolution so the
+    # noise grids and RNG consumption are identical at any output size.
+    # Only the coordinates are scaled — rendering is at actual resolution.
+    ref_h = 1024
+    ref_w = max(1, round(w * ref_h / h))
+    scale_x = w / ref_w
+    scale_y = h / ref_h
+
+    poly = _build_tablet_polygon(ref_w, ref_h, config, rng)
     if len(poly) < 3:
         return Image.new('L', (w, h), 0)
 
+    scaled_poly = [(px * scale_x, py * scale_y) for px, py in poly]
+
     img = Image.new('L', (w, h), 0)
     draw = ImageDraw.Draw(img)
-    draw.polygon(poly, fill=255)
+    draw.polygon(scaled_poly, fill=255)
 
     # Minimal anti-alias blur (just 1px to soften staircase)
     img = img.filter(ImageFilter.GaussianBlur(radius=1))
