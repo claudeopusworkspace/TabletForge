@@ -529,7 +529,13 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                         angle = rng.uniform(0, 2 * np.pi)
 
                     crack_len = int(h * rng.uniform(0.05, 0.25))
-                    pts = [(sx, sy)]
+
+                    # Start a few px backward (outward) so the V
+                    # opening extends past the tablet edge.
+                    back = 5.0
+                    pts = [(sx - np.cos(angle) * back,
+                            sy - np.sin(angle) * back),
+                           (sx, sy)]
 
                     for _ in range(crack_len):
                         sx += np.cos(angle) * 1.5
