@@ -473,8 +473,9 @@ def _apply_weathering(stone, tablet_mask, config, rng):
       - Middle 60%: slightly wider than 1px
       - Last 20%: tapers to 1px at the tip
 
-    The first ~5 px of each crack (at the perimeter) are cut out of
-    the tablet mask so that small chunks are actually missing.
+    Where a crack is wider than 10 px, the inner portion (beyond a
+    5 px rim on each side) is punched through the tablet mask so
+    the background shows through the fissure.
 
     Returns (stone, tablet_mask) — the mask may be modified.
     """
@@ -488,7 +489,6 @@ def _apply_weathering(stone, tablet_mask, config, rng):
         cutout_draw = ImageDraw.Draw(cutout_img)
 
         n_cracks = max(0, int(config.crack_density * 8 * rng.poisson(2)))
-        cutout_depth = 5.0   # px of crack that are fully transparent
 
         if n_cracks > 0:
             # Find edge pixels (interior with at least one exterior neighbor)
@@ -545,13 +545,6 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                     if len(pts) < 3:
                         continue
 
-                    # --- Cumulative path distance (for cutout threshold) ---
-                    cum_dist = [0.0]
-                    for j in range(1, len(pts)):
-                        d = np.sqrt((pts[j][0] - pts[j - 1][0]) ** 2
-                                    + (pts[j][1] - pts[j - 1][1]) ** 2)
-                        cum_dist.append(cum_dist[-1] + d)
-
                     # --- Build variable-width polygon along the crack ---
                     total = len(pts)
                     v_width = h * rng.uniform(0.015, 0.04)
@@ -559,6 +552,9 @@ def _apply_weathering(stone, tablet_mask, config, rng):
 
                     left_side = []
                     right_side = []
+                    left_hws = []
+                    right_hws = []
+                    norms = []
 
                     for i, (px, py) in enumerate(pts):
                         t = i / max(1, total - 1)
@@ -583,10 +579,10 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                         else:
                             jag_amp = 0.0
 
-                        left_hw = max(0.3, base_hw
-                                      + rng.uniform(-jag_amp, jag_amp))
-                        right_hw = max(0.3, base_hw
-                                       + rng.uniform(-jag_amp, jag_amp))
+                        lhw = max(0.3, base_hw
+                                  + rng.uniform(-jag_amp, jag_amp))
+                        rhw = max(0.3, base_hw
+                                  + rng.uniform(-jag_amp, jag_amp))
 
                         # Perpendicular direction
                         if i < total - 1:
@@ -598,10 +594,13 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                         mag = max(0.001, np.sqrt(dx * dx + dy * dy))
                         nx, ny = -dy / mag, dx / mag
 
+                        left_hws.append(lhw)
+                        right_hws.append(rhw)
+                        norms.append((nx, ny))
                         left_side.append(
-                            (px + nx * left_hw, py + ny * left_hw))
+                            (px + nx * lhw, py + ny * lhw))
                         right_side.append(
-                            (px - nx * right_hw, py - ny * right_hw))
+                            (px - nx * rhw, py - ny * rhw))
 
                     # Draw full crack on the darkening layer
                     poly = left_side + right_side[::-1]
@@ -612,20 +611,33 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                             fill=200,
                         )
 
-                    # Draw cutout polygon (first ~cutout_depth px of path)
-                    cutout_end = 0
-                    for j, d in enumerate(cum_dist):
-                        if d > cutout_depth:
-                            break
-                        cutout_end = j
-                    if cutout_end >= 2:
-                        cutout_poly = (left_side[:cutout_end + 1]
-                                       + right_side[:cutout_end + 1][::-1])
-                        cutout_draw.polygon(
-                            [(int(round(x)), int(round(y)))
-                             for x, y in cutout_poly],
-                            fill=255,
-                        )
+                    # Cutout: transparent middle where crack is
+                    # wider than 2*rim.  5 px of stone stays visible
+                    # on each side; the interior is punched out.
+                    rim = 5.0
+                    co_left = []
+                    co_right = []
+                    has_cutout = False
+
+                    for i, (px, py) in enumerate(pts):
+                        nx, ny = norms[i]
+                        inner_l = max(0.0, left_hws[i] - rim)
+                        inner_r = max(0.0, right_hws[i] - rim)
+                        if inner_l > 0 or inner_r > 0:
+                            has_cutout = True
+                        co_left.append(
+                            (px + nx * inner_l, py + ny * inner_l))
+                        co_right.append(
+                            (px - nx * inner_r, py - ny * inner_r))
+
+                    if has_cutout:
+                        co_poly = co_left + co_right[::-1]
+                        if len(co_poly) >= 3:
+                            cutout_draw.polygon(
+                                [(int(round(x)), int(round(y)))
+                                 for x, y in co_poly],
+                                fill=255,
+                            )
 
         # Darken stone along cracks
         crack_mask = np.array(
@@ -634,7 +646,7 @@ def _apply_weathering(stone, tablet_mask, config, rng):
         ) / 255.0
         stone *= (1.0 - crack_mask * 0.4)[:, :, np.newaxis]
 
-        # Cut the entry chunks out of the tablet mask (soft edge)
+        # Punch through the interior of wide cracks (soft edge)
         cutout_arr = np.array(
             cutout_img.filter(ImageFilter.GaussianBlur(radius=1.5)),
             dtype=np.float64
