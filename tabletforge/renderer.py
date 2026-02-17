@@ -562,10 +562,17 @@ def _apply_weathering(stone, tablet_mask, config, rng):
                 ref_h = 1024
                 scale = h / ref_h
 
-                for _ in range(n_cracks):
-                    # Normalised edge-pixel selection so the same
-                    # relative perimeter position is chosen at any res.
-                    edge_frac = crack_rng.uniform(0, 1)
+                # Stratified sampling: divide the perimeter into
+                # equal segments and place each crack randomly
+                # within its segment for balanced distribution.
+                seg = 1.0 / max(1, n_cracks)
+                edge_fracs = np.array([
+                    (i + crack_rng.uniform(0.1, 0.9)) * seg
+                    for i in range(n_cracks)
+                ])
+
+                for ci in range(n_cracks):
+                    edge_frac = edge_fracs[ci]
                     idx = min(int(edge_frac * len(edge_ys)),
                               len(edge_ys) - 1)
                     sx, sy = float(edge_xs[idx]), float(edge_ys[idx])
