@@ -524,6 +524,15 @@ def _apply_weathering(stone, tablet_mask, config, rng):
             edge_ys, edge_xs = np.where(edge_pixels)
 
             if len(edge_ys) > 0:
+                # Sort edge pixels by angle from the tablet centre so
+                # a normalised fraction maps to the same perimeter
+                # position regardless of resolution.
+                cx = edge_xs.mean()
+                cy = edge_ys.mean()
+                angles = np.arctan2(edge_ys - cy, edge_xs - cx)
+                order = np.argsort(angles)
+                edge_xs = edge_xs[order]
+                edge_ys = edge_ys[order]
                 # Blurred mask gradient → inward direction
                 blur_r = max(3, h // 20)
                 dist_arr = np.array(
